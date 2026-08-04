@@ -1,6 +1,7 @@
 name: Gate 0 candidate
 
 on:
+  pull_request:
   workflow_dispatch:
 
 permissions:

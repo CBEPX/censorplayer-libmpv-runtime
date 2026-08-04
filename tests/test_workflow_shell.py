@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import subprocess
 import unittest
@@ -8,6 +9,18 @@ STEP = "      - name: Package and verify recursive runtime closure"
 
 
 class WorkflowShellTests(unittest.TestCase):
+    def test_new_repository_pull_request_can_trigger_gate0(self):
+        result = subprocess.run(
+            ["yq", "eval", "-o=json", ".on", str(WORKFLOW)],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        triggers = json.loads(result.stdout)
+        self.assertIn("pull_request", triggers)
+        self.assertIn("workflow_dispatch", triggers)
+
     def test_runtime_probe_pipeline_cannot_mask_wine_failure(self):
         lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
         step = lines.index(STEP)

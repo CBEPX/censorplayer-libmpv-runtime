@@ -4,7 +4,10 @@ Controlled Windows x64 libmpv runtime work for CensorPlayer.
 
 ## Gate 0 feasibility proof
 
-The manual `Gate 0 candidate` workflow checks out mpv commit
+The read-only, non-publishing `Gate 0 candidate` workflow runs on pull requests,
+including while the workflow is new to the repository. `workflow_dispatch`
+remains available for manual runs after the workflow reaches the default
+branch. The workflow checks out mpv commit
 [`85bf9f4ff46cd45686cfe2fd22f49828877db5cb`](https://github.com/mpv-player/mpv/commit/85bf9f4ff46cd45686cfe2fd22f49828877db5cb)
 and replaces only its FFmpeg checkout with FFmpeg commit
 [`272c273d30f737632e6630458ed36a0bdbfbc3fc`](https://github.com/FFmpeg/FFmpeg/commit/272c273d30f737632e6630458ed36a0bdbfbc3fc).
