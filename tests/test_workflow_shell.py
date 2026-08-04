@@ -6,6 +6,7 @@ import unittest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/gate0.yml"
 STEP = "      - name: Package and verify recursive runtime closure"
+PREFETCH_STEP = "Prefetch verified libiconv source"
 
 
 class WorkflowShellTests(unittest.TestCase):
@@ -38,6 +39,36 @@ class WorkflowShellTests(unittest.TestCase):
             0,
             "the packaging step can mask a failed command at the start of a pipeline",
         )
+
+    def test_libiconv_prefetch_populates_upstream_wget_cache(self):
+        result = subprocess.run(
+            ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        steps = json.loads(result.stdout)
+        step = next(step for step in steps if step.get("name") == PREFETCH_STEP)
+        self.assertEqual(step["working-directory"], "upstream")
+        names = [step.get("name") for step in steps]
+        self.assertLess(
+            names.index(PREFETCH_STEP), names.index("Build upstream dependency set")
+        )
+        script = step["run"]
+        self.assertEqual(script.splitlines()[0], "set -euo pipefail")
+        contracts = (
+            "task_archive=libiconv-1.18.tar.gz",
+            "curl --fail --show-error --silent --location",
+            "--retry 5 --retry-all-errors --connect-timeout 20",
+            '--output "$task_archive"',
+            "https://ftp.gnu.org/gnu/libiconv/libiconv-1.18.tar.gz",
+            'test "$(wc -c < "$task_archive")" -eq 5822590',
+            "3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8",
+            "sha256sum --check --strict",
+        )
+        for contract in contracts:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, script)
 
 
 if __name__ == "__main__":
