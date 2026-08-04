@@ -216,11 +216,15 @@ class WorkflowShellTests(unittest.TestCase):
                         test "$objdump_count" -eq 1
                         test "$objdump" = x86_64-w64-mingw32-objdump
                         test "$api_version_count" -eq 1
-                        if [[ $output == "$RUNNER_TEMP/"* ]]; then
-                          test "$api_version" = "$FAKE_HEADER_API"
-                        else
-                          test "$api_version" = "$FAKE_RUNTIME_API"
-                        fi
+                        case "$output" in
+                          "$RUNNER_TEMP/gate0-api-probe")
+                            test "$api_version" = "$FAKE_HEADER_API"
+                            ;;
+                          gate0-candidate)
+                            test "$api_version" = "$FAKE_RUNTIME_API"
+                            ;;
+                          *) exit 66 ;;
+                        esac
                         mkdir "$output"
                         touch "$output/.packaged-closure"
                         cp upstream/mingw_build/libmpv-2.dll "$output/"
