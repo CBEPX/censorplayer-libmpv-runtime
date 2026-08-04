@@ -6,7 +6,7 @@ import unittest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/gate0.yml"
 STEP = "      - name: Package and verify recursive runtime closure"
-PREFETCH_STEP = "Prefetch verified libiconv source"
+ARCHIVE_PREFETCH_STEP = "Prefetch verified upstream archives"
 NV_HEADERS_STEP = "Check out exact nv-codec-headers source"
 
 
@@ -41,7 +41,7 @@ class WorkflowShellTests(unittest.TestCase):
             "the packaging step can mask a failed command at the start of a pipeline",
         )
 
-    def test_libiconv_prefetch_populates_upstream_wget_cache(self):
+    def test_archive_prefetch_populates_upstream_wget_cache(self):
         result = subprocess.run(
             ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
             check=True,
@@ -49,27 +49,72 @@ class WorkflowShellTests(unittest.TestCase):
             text=True,
         )
         steps = json.loads(result.stdout)
-        step = next(step for step in steps if step.get("name") == PREFETCH_STEP)
+        matching_steps = [
+            step for step in steps if step.get("name") == ARCHIVE_PREFETCH_STEP
+        ]
+        self.assertEqual(len(matching_steps), 1, "missing verified archive prefetch")
+        step = matching_steps[0]
         self.assertEqual(step["working-directory"], "upstream")
         names = [step.get("name") for step in steps]
         self.assertLess(
-            names.index(PREFETCH_STEP), names.index("Build upstream dependency set")
+            names.index(ARCHIVE_PREFETCH_STEP),
+            names.index("Build upstream dependency set"),
         )
         script = step["run"]
         self.assertEqual(script.splitlines()[0], "set -euo pipefail")
         contracts = (
-            "task_archive=libiconv-1.18.tar.gz",
+            "prefetch_archive() {",
             "curl --fail --show-error --silent --location",
             "--retry 5 --retry-all-errors --connect-timeout 20",
             '--output "$task_archive"',
-            "https://ftp.gnu.org/gnu/libiconv/libiconv-1.18.tar.gz",
-            'test "$(wc -c < "$task_archive")" -eq 5822590',
-            "3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8",
+            'test "$(wc -c < "$task_archive")" -eq "$task_size"',
+            "task_sha256",
             "sha256sum --check --strict",
         )
         for contract in contracts:
             with self.subTest(contract=contract):
                 self.assertIn(contract, script)
+        archives = (
+            (
+                "libiconv-1.18.tar.gz",
+                5822590,
+                "3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8",
+                "https://ftp.gnu.org/gnu/libiconv/libiconv-1.18.tar.gz",
+            ),
+            (
+                "zlib-1.3.1.tar.gz",
+                1512791,
+                "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+                "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+            ),
+            (
+                "AMF-headers-v1.5.0.tar.gz",
+                82755,
+                "d569647fa26f289affe81a206259fa92f819d06db1e80cc334559953e82a3f01",
+                "https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.5.0/AMF-headers-v1.5.0.tar.gz",
+            ),
+            (
+                "freetype-2.14.1.tar.xz",
+                2664948,
+                "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+                "https://download-mirror.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.xz",
+            ),
+            (
+                "fribidi-1.0.16.tar.xz",
+                1098260,
+                "1b1cde5b235d40479e91be2f0e88a309e3214c8ab470ec8a2744d82a5a9ea05c",
+                "https://github.com/fribidi/fribidi/releases/download/v1.0.16/fribidi-1.0.16.tar.xz",
+            ),
+            (
+                "harfbuzz-12.2.0.tar.xz",
+                18221900,
+                "ecb603aa426a8b24665718667bda64a84c1504db7454ee4cadbd362eea64e545",
+                "https://github.com/harfbuzz/harfbuzz/releases/download/12.2.0/harfbuzz-12.2.0.tar.xz",
+            ),
+        )
+        for archive in archives:
+            with self.subTest(archive=archive[0]):
+                self.assertIn(" ".join(map(str, archive)), script)
 
     def test_nv_codec_headers_checkout_is_pinned_before_upstream_build(self):
         result = subprocess.run(
