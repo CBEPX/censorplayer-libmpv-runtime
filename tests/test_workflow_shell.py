@@ -1,6 +1,9 @@
 import json
+import os
 from pathlib import Path
 import subprocess
+import tempfile
+import textwrap
 import unittest
 
 
@@ -12,6 +15,16 @@ PACKAGE_STEP = "Package and verify recursive runtime closure"
 
 
 class WorkflowShellTests(unittest.TestCase):
+    def package_script(self):
+        result = subprocess.run(
+            ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        steps = json.loads(result.stdout)
+        return next(step["run"] for step in steps if step.get("name") == PACKAGE_STEP)
+
     def test_new_repository_pull_request_can_trigger_gate0(self):
         result = subprocess.run(
             ["yq", "eval", "-o=json", ".on", str(WORKFLOW)],
@@ -41,6 +54,124 @@ class WorkflowShellTests(unittest.TestCase):
             0,
             "the packaging step can mask a failed command at the start of a pipeline",
         )
+
+    def test_runtime_probe_runs_from_packager_created_closure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            (root / "upstream/mingw_build").mkdir(parents=True)
+            (root / "upstream/mingw_prefix/bin").mkdir(parents=True)
+            (root / "upstream/include").mkdir(parents=True)
+            (root / "upstream/mingw_build/libmpv-2.dll").write_bytes(b"libmpv")
+            runtime = root / "runtime"
+            runtime.mkdir()
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            for name in ("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll"):
+                (runtime / name).write_bytes(name.encode())
+
+            compiler = textwrap.dedent(
+                """\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                output=
+                for argument in "$@"; do
+                  case "$argument" in
+                    -print-file-name=*)
+                      printf '%s/%s\\n' "$FAKE_RUNTIME" "${argument#*=}"
+                      exit
+                      ;;
+                  esac
+                done
+                while (($#)); do
+                  if [[ $1 == -o ]]; then
+                    output=$2
+                    shift
+                  fi
+                  shift
+                done
+                test -n "$output"
+                cat >/dev/null
+                printf '#!/usr/bin/env bash\\nprintf "131077\\\\n"\\n' > "$output"
+                chmod +x "$output"
+                """
+            )
+            for name in ("cc", "x86_64-w64-mingw32-gcc-posix"):
+                path = tools / name
+                path.write_text(compiler, encoding="utf-8")
+                path.chmod(0o755)
+
+            python = tools / "python3"
+            python.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    command=$1
+                    shift
+                    case "$command" in
+                      scripts/package_candidate.py)
+                        output=
+                        api_version=
+                        while (($#)); do
+                          case "$1" in
+                            --output) output=$2; shift ;;
+                            --api-version) api_version=$2; shift ;;
+                          esac
+                          shift
+                        done
+                        test "$api_version" = 131077
+                        mkdir "$output"
+                        touch "$output/.packaged-closure"
+                        cp upstream/mingw_build/libmpv-2.dll "$output/"
+                        ;;
+                      scripts/verify_runtime.py)
+                        test -f gate0-candidate/.packaged-closure
+                        ;;
+                      *) exit 64 ;;
+                    esac
+                    """
+                ),
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+
+            wine = tools / "wine"
+            wine.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env bash
+                    set -euo pipefail
+                    if [[ ! -f .packaged-closure ]]; then
+                      echo 'Wine ran before package_candidate.py created the probe closure' >&2
+                      exit 97
+                    fi
+                    "$@"
+                    """
+                ),
+                encoding="utf-8",
+            )
+            wine.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "PATH": f"{tools}:{environment['PATH']}",
+                    "RUNNER_TEMP": str(runner_temp),
+                    "FAKE_RUNTIME": str(runtime),
+                }
+            )
+            result = subprocess.run(
+                ["bash"],
+                cwd=root,
+                env=environment,
+                input=self.package_script(),
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_package_uses_curated_runtime_support_root(self):
         result = subprocess.run(
