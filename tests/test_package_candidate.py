@@ -130,6 +130,23 @@ else:
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("duplicate available DLL name", result.stderr)
 
+    def test_reports_all_reachable_unresolved_imports(self):
+        objdump = self.objdump.read_text(encoding="utf-8").replace(
+            "\tDLL Name: avcodec-62.dll",
+            "\tDLL Name: z-missing.dll\n"
+            "\tDLL Name: a-missing.dll\n"
+            "\tDLL Name: avcodec-62.dll",
+        )
+        self.objdump.write_text(objdump, encoding="utf-8")
+
+        result = self.run_packager()
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "unresolved non-system imports: a-missing.dll, z-missing.dll",
+            result.stderr,
+        )
+
     def test_rejects_missing_search_root(self):
         missing = self.root / "missing"
 

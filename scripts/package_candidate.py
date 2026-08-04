@@ -62,14 +62,16 @@ def package(libmpv, search_roots, output, objdump, api_version):
                 add_available(path)
 
     records = {}
+    unresolved = set()
     pending = [libmpv.name.casefold()]
     while pending:
         key = pending.pop()
-        if key in records:
+        if key in records or key in unresolved:
             continue
         available_file = available.get(key)
         if available_file is None:
-            raise ValueError(f"unresolved non-system import: {key}")
+            unresolved.add(key)
+            continue
         path, _ = available_file
         record = inspect(objdump, path)
         records[key] = (path, record)
@@ -77,6 +79,11 @@ def package(libmpv, search_roots, output, objdump, api_version):
             imported_key = imported.casefold()
             if imported_key not in records and not is_system_dll(imported):
                 pending.append(imported_key)
+
+    if unresolved:
+        raise ValueError(
+            f"unresolved non-system imports: {', '.join(sorted(unresolved))}"
+        )
 
     output.mkdir(parents=True, exist_ok=False)
     manifest_files = []
