@@ -10,6 +10,7 @@ permissions:
 jobs:
   tests:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Check out runtime recipe
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -169,7 +170,7 @@ jobs:
           EOF
           task_api_version=$(
             cd "$task_probe_dir" || exit 1
-            WINEDEBUG=-all wine ./libmpv-api-version.exe | tr -d '\r'
+            WINEDEBUG=fixme-all wine ./libmpv-api-version.exe | tr -d '\r'
           )
           [[ "$task_api_version" =~ ^[0-9]+$ ]]
           (( (task_api_version >> 16) == 2 ))

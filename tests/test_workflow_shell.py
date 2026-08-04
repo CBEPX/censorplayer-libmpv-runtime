@@ -47,31 +47,40 @@ class WorkflowShellTests(unittest.TestCase):
         jobs = json.loads(result.stdout)
 
         self.assertIn("tests", jobs)
-        self.assertEqual(jobs["gate0"].get("needs"), "tests")
+        needs = jobs["gate0"].get("needs", [])
+        if isinstance(needs, str):
+            needs = [needs]
+        self.assertIsInstance(needs, list)
+        self.assertIn("tests", needs)
+
+        tests = jobs["tests"]
+        self.assertEqual(tests.get("runs-on"), "ubuntu-24.04")
+        self.assertEqual(tests.get("timeout-minutes"), 10)
+        checkout = [
+            step
+            for step in tests.get("steps", [])
+            if step.get("name") == "Check out runtime recipe"
+        ]
+        self.assertEqual(len(checkout), 1)
         self.assertEqual(
-            jobs["tests"],
-            {
-                "runs-on": "ubuntu-24.04",
-                "steps": [
-                    {
-                        "name": "Check out runtime recipe",
-                        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
-                        "with": {"persist-credentials": False},
-                    },
-                    {
-                        "name": "Run fast repository tests",
-                        "run": "\n".join(
-                            (
-                                "set -euo pipefail",
-                                "python3 -m unittest discover -s tests -p 'test_*.py' -v",
-                                "python3 -m compileall -q scripts tests",
-                            )
-                        )
-                        + "\n",
-                    },
-                ],
-            },
+            checkout[0].get("uses"),
+            "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
         )
+        self.assertIs(
+            checkout[0].get("with", {}).get("persist-credentials"), False
+        )
+        run_steps = [
+            step
+            for step in tests.get("steps", [])
+            if step.get("name") == "Run fast repository tests"
+        ]
+        self.assertEqual(len(run_steps), 1)
+        commands = run_steps[0]["run"].splitlines()
+        self.assertEqual(commands[0], "set -euo pipefail")
+        self.assertIn(
+            "python3 -m unittest discover -s tests -p 'test_*.py' -v", commands
+        )
+        self.assertIn("python3 -m compileall -q scripts tests", commands)
 
     def test_runtime_probe_pipeline_cannot_mask_wine_failure(self):
         lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
@@ -130,18 +139,25 @@ class WorkflowShellTests(unittest.TestCase):
                 test -n "$output"
                 cat >/dev/null
                 api_value=${API_VARIABLE}
-                printf '#!/usr/bin/env bash\\nprintf "%%s\\\\n" "%s"\\n' \
+                printf '#!/usr/bin/env bash\\nAPI_MARKERprintf "%%s\\\\n" "%s"\\n' \
                   "$api_value" > "$output"
                 chmod +x "$output"
                 """
             )
-            for name, api_variable in (
-                ("cc", "FAKE_HEADER_API"),
-                ("x86_64-w64-mingw32-gcc-posix", "FAKE_RUNTIME_API"),
+            for name, api_variable, api_marker in (
+                (
+                    "cc",
+                    "FAKE_HEADER_API",
+                    'touch "$RUNNER_TEMP/header-api-ran"\\n',
+                ),
+                ("x86_64-w64-mingw32-gcc-posix", "FAKE_RUNTIME_API", ""),
             ):
                 path = tools / name
                 path.write_text(
-                    compiler.replace("API_VARIABLE", api_variable), encoding="utf-8"
+                    compiler.replace("API_VARIABLE", api_variable).replace(
+                        "API_MARKER", api_marker
+                    ),
+                    encoding="utf-8",
                 )
                 path.chmod(0o755)
 
@@ -155,15 +171,51 @@ class WorkflowShellTests(unittest.TestCase):
                     shift
                     case "$command" in
                       scripts/package_candidate.py)
+                        libmpv_count=0
+                        output_count=0
+                        objdump_count=0
+                        api_version_count=0
+                        libmpv=
                         output=
+                        objdump=
                         api_version=
+                        search_roots=()
                         while (($#)); do
+                          if (($# < 2)); then
+                            exit 65
+                          fi
                           case "$1" in
-                            --output) output=$2; shift ;;
-                            --api-version) api_version=$2; shift ;;
+                            --libmpv)
+                              libmpv_count=$((libmpv_count + 1))
+                              libmpv=$2
+                              ;;
+                            --search-root) search_roots+=("$2") ;;
+                            --output)
+                              output_count=$((output_count + 1))
+                              output=$2
+                              ;;
+                            --objdump)
+                              objdump_count=$((objdump_count + 1))
+                              objdump=$2
+                              ;;
+                            --api-version)
+                              api_version_count=$((api_version_count + 1))
+                              api_version=$2
+                              ;;
+                            *) exit 64 ;;
                           esac
-                          shift
+                          shift 2
                         done
+                        test "$libmpv_count" -eq 1
+                        test "$libmpv" = upstream/mingw_build/libmpv-2.dll
+                        test "${#search_roots[@]}" -eq 2
+                        test "${search_roots[0]}" = upstream/mingw_prefix/bin
+                        test "${search_roots[1]}" = \
+                          "$RUNNER_TEMP/gate0-runtime-support"
+                        test "$output_count" -eq 1
+                        test "$objdump_count" -eq 1
+                        test "$objdump" = x86_64-w64-mingw32-objdump
+                        test "$api_version_count" -eq 1
                         if [[ $output == "$RUNNER_TEMP/"* ]]; then
                           test "$api_version" = "$FAKE_HEADER_API"
                         else
@@ -190,6 +242,7 @@ class WorkflowShellTests(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     set -euo pipefail
+                    test "${WINEDEBUG:-}" = fixme-all
                     if [[ ! -f .packaged-closure ]]; then
                       echo 'Wine ran before package_candidate.py created the probe closure' >&2
                       exit 97
@@ -222,26 +275,31 @@ class WorkflowShellTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            return result, (runner_temp / "wine-ran").exists()
+            return (
+                result,
+                (runner_temp / "wine-ran").exists(),
+                (runner_temp / "header-api-ran").exists(),
+            )
 
     def test_runtime_probe_runs_from_packager_created_closure(self):
-        result, wine_ran = self.run_package_script()
+        result, wine_ran, _ = self.run_package_script()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(wine_ran, "the workflow returned success without running Wine")
 
     def test_runtime_probe_rejects_api_version_mismatch(self):
-        result, wine_ran = self.run_package_script(runtime_api="131078")
+        result, wine_ran, _ = self.run_package_script(runtime_api="131078")
 
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(wine_ran, "the runtime API probe did not run")
 
     def test_runtime_probe_rejects_header_major_other_than_two(self):
-        result, wine_ran = self.run_package_script(
+        result, wine_ran, header_api_ran = self.run_package_script(
             header_api="65541", runtime_api="65541"
         )
 
         self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(header_api_ran, "the header API helper did not run")
         self.assertFalse(wine_ran, "the invalid header API reached Wine")
 
     def test_package_uses_curated_runtime_support_root(self):
