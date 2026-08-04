@@ -55,7 +55,7 @@ class WorkflowShellTests(unittest.TestCase):
             "the packaging step can mask a failed command at the start of a pipeline",
         )
 
-    def test_runtime_probe_runs_from_packager_created_closure(self):
+    def run_package_script(self, header_api="131077", runtime_api="131077"):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tools = root / "tools"
@@ -93,13 +93,20 @@ class WorkflowShellTests(unittest.TestCase):
                 done
                 test -n "$output"
                 cat >/dev/null
-                printf '#!/usr/bin/env bash\\nprintf "131077\\\\n"\\n' > "$output"
+                api_value=${API_VARIABLE}
+                printf '#!/usr/bin/env bash\\nprintf "%%s\\\\n" "%s"\\n' \
+                  "$api_value" > "$output"
                 chmod +x "$output"
                 """
             )
-            for name in ("cc", "x86_64-w64-mingw32-gcc-posix"):
+            for name, api_variable in (
+                ("cc", "FAKE_HEADER_API"),
+                ("x86_64-w64-mingw32-gcc-posix", "FAKE_RUNTIME_API"),
+            ):
                 path = tools / name
-                path.write_text(compiler, encoding="utf-8")
+                path.write_text(
+                    compiler.replace("API_VARIABLE", api_variable), encoding="utf-8"
+                )
                 path.chmod(0o755)
 
             python = tools / "python3"
@@ -121,7 +128,11 @@ class WorkflowShellTests(unittest.TestCase):
                           esac
                           shift
                         done
-                        test "$api_version" = 131077
+                        if [[ $output == "$RUNNER_TEMP/"* ]]; then
+                          test "$api_version" = "$FAKE_HEADER_API"
+                        else
+                          test "$api_version" = "$FAKE_RUNTIME_API"
+                        fi
                         mkdir "$output"
                         touch "$output/.packaged-closure"
                         cp upstream/mingw_build/libmpv-2.dll "$output/"
@@ -147,6 +158,7 @@ class WorkflowShellTests(unittest.TestCase):
                       echo 'Wine ran before package_candidate.py created the probe closure' >&2
                       exit 97
                     fi
+                    touch "$RUNNER_TEMP/wine-ran"
                     "$@"
                     """
                 ),
@@ -160,18 +172,41 @@ class WorkflowShellTests(unittest.TestCase):
                     "PATH": f"{tools}:{environment['PATH']}",
                     "RUNNER_TEMP": str(runner_temp),
                     "FAKE_RUNTIME": str(runtime),
+                    "FAKE_HEADER_API": header_api,
+                    "FAKE_RUNTIME_API": runtime_api,
                 }
             )
+            step = root / "step.sh"
+            step.write_text(self.package_script(), encoding="utf-8")
             result = subprocess.run(
-                ["bash"],
+                ["bash", str(step)],
                 cwd=root,
                 env=environment,
-                input=self.package_script(),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
             )
+            return result, (runner_temp / "wine-ran").exists()
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+    def test_runtime_probe_runs_from_packager_created_closure(self):
+        result, wine_ran = self.run_package_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(wine_ran, "the workflow returned success without running Wine")
+
+    def test_runtime_probe_rejects_api_version_mismatch(self):
+        result, wine_ran = self.run_package_script(runtime_api="131078")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(wine_ran, "the runtime API probe did not run")
+
+    def test_runtime_probe_rejects_header_major_other_than_two(self):
+        result, wine_ran = self.run_package_script(
+            header_api="65541", runtime_api="65541"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(wine_ran, "the invalid header API reached Wine")
 
     def test_package_uses_curated_runtime_support_root(self):
         result = subprocess.run(
