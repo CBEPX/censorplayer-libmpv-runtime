@@ -15,10 +15,13 @@ REQUIRED_EXPORTS = {
     "mpv_terminate_destroy",
     "mpv_wait_event",
 }
+# Only Windows-provided DLLs belong here; never add toolchain or third-party runtimes.
 SYSTEM_DLLS = {
     "advapi32.dll",
+    "avicap32.dll",
     "avrt.dll",
     "bcrypt.dll",
+    "bcryptprimitives.dll",
     "cfgmgr32.dll",
     "comctl32.dll",
     "comdlg32.dll",
@@ -46,9 +49,11 @@ SYSTEM_DLLS = {
     "mmdevapi.dll",
     "mpr.dll",
     "msvcrt.dll",
+    "ncrypt.dll",
     "ntdll.dll",
     "ole32.dll",
     "oleaut32.dll",
+    "opengl32.dll",
     "powrprof.dll",
     "propsys.dll",
     "psapi.dll",

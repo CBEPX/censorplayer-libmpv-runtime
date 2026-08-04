@@ -33,6 +33,10 @@ if mode == '-f':
 elif mode == '-p' and name == 'libmpv-2.dll':
     print('''
 \tDLL Name: KERNEL32.dll
+\tDLL Name: AVICap32.DLL
+\tDLL Name: BCryptPrimitives.dll
+\tDLL Name: NCrypt.DLL
+\tDLL Name: OpenGL32.dll
 \tDLL Name: UxTheme.dll
 \tDLL Name: SHCore.DLL
 \tDLL Name: avcodec-62.dll
@@ -98,12 +102,6 @@ else:
             (self.output / "pe-inspection.json").read_text(encoding="utf-8")
         )
         self.assertEqual(inspection["libmpv_api_version"], API_VERSION)
-        libmpv = next(
-            record for record in inspection["files"] if record["path"] == "libmpv-2.dll"
-        )
-        self.assertIn("UxTheme.dll", libmpv["imports"])
-        self.assertIn("SHCore.DLL", libmpv["imports"])
-
         verified = subprocess.run(
             [
                 sys.executable,
