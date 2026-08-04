@@ -1,0 +1,125 @@
+name: Gate 0 candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate0:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-w64-mingw32
+      RUST_TARGET: x86_64-pc-windows-gnu
+    steps:
+      - name: Check out runtime recipe
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Check out exact mpv source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: mpv-player/mpv
+          ref: 85bf9f4ff46cd45686cfe2fd22f49828877db5cb
+          path: upstream
+          persist-credentials: false
+
+      - name: Replace only FFmpeg checkout with exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: FFmpeg/FFmpeg
+          ref: 272c273d30f737632e6630458ed36a0bdbfbc3fc
+          path: upstream/ffmpeg
+          persist-credentials: false
+
+      - name: Install upstream MinGW build dependencies
+        run: |
+          rustup target add "$RUST_TARGET"
+          sudo dpkg --add-architecture i386
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            ccache g++-mingw-w64 gcc-multilib nasm ninja-build pkgconf wine64 wine
+          python3 -m pip install meson
+          mkdir -p "$RUNNER_TEMP/gate0-toolchain-source"
+          cd "$RUNNER_TEMP/gate0-toolchain-source" || exit 1
+          apt-get source gcc-mingw-w64-x86-64 mingw-w64
+          dpkg-query -W 'gcc-mingw-w64*' 'g++-mingw-w64*' 'mingw-w64*' \
+            > INSTALLED-PACKAGES.txt
+
+      - name: Install upstream Meson wraps
+        working-directory: upstream
+        run: |
+          mkdir -p subprojects
+          meson wrap install mujs
+          meson subprojects download
+
+      - name: Build upstream dependency set
+        working-directory: upstream
+        run: ./ci/build-mingw64.sh
+
+      - name: Build upstream mpv and package its dependencies
+        working-directory: upstream
+        run: ./ci/build-mingw64.sh meson pack
+
+      - name: Prove libmpv output exists
+        run: test -f upstream/mingw_build/libmpv-2.dll
+
+      - name: Package and verify recursive runtime closure
+        run: |
+          task_runtime_roots=(upstream/mingw_prefix/bin)
+          for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+            task_path=$(x86_64-w64-mingw32-gcc-posix -print-file-name="$task_dll")
+            test -f "$task_path"
+            task_runtime_roots+=("$(dirname "$task_path")")
+          done
+          task_search_args=()
+          for task_root in "${task_runtime_roots[@]}"; do
+            task_search_args+=(--search-root "$task_root")
+          done
+          python3 scripts/package_candidate.py \
+            --libmpv upstream/mingw_build/libmpv-2.dll \
+            "${task_search_args[@]}" \
+            --output gate0-candidate \
+            --objdump x86_64-w64-mingw32-objdump
+          python3 scripts/verify_runtime.py \
+            --manifest gate0-candidate/runtime-manifest.json \
+            --inspection gate0-candidate/pe-inspection.json \
+            --directory gate0-candidate
+
+      - name: Snapshot all corresponding source
+        run: |
+          task_snapshot="$RUNNER_TEMP/gate0-source-snapshot"
+          mkdir -p "$task_snapshot/recipe" "$task_snapshot/upstream" \
+            "$task_snapshot/toolchain-source" "$task_snapshot/cargo"
+          git archive HEAD | tar -xf - -C "$task_snapshot/recipe"
+          tar -C upstream \
+            --exclude=mingw_build \
+            --exclude=mingw_prefix \
+            --exclude=artifact \
+            --exclude='*/builddir' \
+            -cf - . | tar -xf - -C "$task_snapshot/upstream"
+          cp -a "$RUNNER_TEMP/gate0-toolchain-source/." \
+            "$task_snapshot/toolchain-source/"
+          task_cargo_root="${CARGO_HOME:-/home/runner/.cargo}"
+          if [[ -d "$task_cargo_root/registry/src" ]]; then
+            cp -a "$task_cargo_root/registry/src" "$task_snapshot/cargo/registry-src"
+          fi
+          if [[ -d "$task_cargo_root/git/checkouts" ]]; then
+            cp -a "$task_cargo_root/git/checkouts" "$task_snapshot/cargo/git-checkouts"
+          fi
+          tar -czf gate0-source-snapshot.tar.gz -C "$task_snapshot" .
+          test -s gate0-source-snapshot.tar.gz
+
+      - name: Upload candidate with source snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gate0-windows-x64-${{ github.sha }}
+          path: |
+            gate0-candidate
+            gate0-source-snapshot.tar.gz
+          if-no-files-found: error
+          retention-days: 7
