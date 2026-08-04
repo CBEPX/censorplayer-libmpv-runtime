@@ -55,6 +55,7 @@ SYSTEM_DLLS = {
     "rpcrt4.dll",
     "secur32.dll",
     "setupapi.dll",
+    "shcore.dll",
     "shell32.dll",
     "shlwapi.dll",
     "user32.dll",
