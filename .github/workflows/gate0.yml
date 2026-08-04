@@ -76,6 +76,32 @@ jobs:
             test -f "$task_path"
             task_runtime_roots+=("$(dirname "$task_path")")
           done
+          task_probe_dir="$RUNNER_TEMP/gate0-api-probe"
+          mkdir -p "$task_probe_dir"
+          cp upstream/mingw_build/libmpv-2.dll "$task_probe_dir/"
+          for task_root in "${task_runtime_roots[@]}"; do
+            find "$task_root" -maxdepth 1 -type f -iname '*.dll' \
+              -exec cp -f {} "$task_probe_dir/" \;
+          done
+          x86_64-w64-mingw32-gcc-posix \
+            -Iupstream/include \
+            -Lupstream/mingw_build \
+            -o "$task_probe_dir/libmpv-api-version.exe" \
+            -x c - -lmpv <<'EOF'
+          #include <stdio.h>
+          #include <mpv/client.h>
+
+          int main(void) {
+              printf("%lu\n", mpv_client_api_version());
+              return 0;
+          }
+          EOF
+          task_api_version=$(
+            cd "$task_probe_dir" || exit 1
+            WINEDEBUG=-all wine ./libmpv-api-version.exe | tr -d '\r'
+          )
+          [[ "$task_api_version" =~ ^[0-9]+$ ]]
+          (( (task_api_version >> 16) == 2 ))
           task_search_args=()
           for task_root in "${task_runtime_roots[@]}"; do
             task_search_args+=(--search-root "$task_root")
@@ -84,7 +110,8 @@ jobs:
             --libmpv upstream/mingw_build/libmpv-2.dll \
             "${task_search_args[@]}" \
             --output gate0-candidate \
-            --objdump x86_64-w64-mingw32-objdump
+            --objdump x86_64-w64-mingw32-objdump \
+            --api-version "$task_api_version"
           python3 scripts/verify_runtime.py \
             --manifest gate0-candidate/runtime-manifest.json \
             --inspection gate0-candidate/pe-inspection.json \

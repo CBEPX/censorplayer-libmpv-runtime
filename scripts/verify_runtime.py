@@ -107,24 +107,47 @@ def is_system_dll(name):
 
 
 def verify(manifest, inspection, directory):
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest must be an object")
+    if not isinstance(inspection, dict):
+        raise ValueError("inspection must be an object")
     if manifest.get("schema") != 1:
         raise ValueError("manifest schema must be 1")
     if inspection.get("schema") != 1:
         raise ValueError("inspection schema must be 1")
     if manifest.get("target") != {"os": "windows", "arch": "x86_64"}:
         raise ValueError("target must be windows/x86_64")
-    if manifest.get("libmpv", {}).get("api_major") != 2:
-        raise ValueError("libmpv API major must be 2")
-    if manifest.get("libmpv", {}).get("path") != "libmpv-2.dll":
+    libmpv = manifest.get("libmpv")
+    if not isinstance(libmpv, dict):
+        raise ValueError("manifest libmpv must be an object")
+    if libmpv.get("path") != "libmpv-2.dll":
         raise ValueError("libmpv path must be libmpv-2.dll")
+    api_version = libmpv.get("api_version")
+    if (
+        not isinstance(api_version, int)
+        or isinstance(api_version, bool)
+        or not 0 <= api_version <= 0xFFFFFFFF
+    ):
+        raise ValueError("manifest libmpv api_version must be an integer")
+    inspected_api_version = inspection.get("libmpv_api_version")
+    if inspected_api_version != api_version:
+        raise ValueError("libmpv API version mismatch")
+    if api_version >> 16 != 2:
+        raise ValueError("measured libmpv API major must be 2")
+    if libmpv.get("api_major") != 2:
+        raise ValueError("libmpv API major must be 2")
 
     files = indexed_records(manifest.get("files"), "manifest")
     inspected = indexed_records(inspection.get("files"), "inspection")
-    actual = {
-        path.relative_to(directory).as_posix().casefold(): path
-        for path in directory.rglob("*")
-        if path.is_file() and path.suffix.casefold() == ".dll"
-    }
+    actual = {}
+    for path in directory.rglob("*"):
+        if not path.is_file() or path.suffix.casefold() != ".dll":
+            continue
+        relative = path.relative_to(directory).as_posix()
+        key = relative.casefold()
+        if key in actual:
+            raise ValueError(f"duplicate physical DLL path: {relative}")
+        actual[key] = path
 
     missing = files.keys() - actual.keys()
     extra = actual.keys() - files.keys()

@@ -1,10 +1,14 @@
 import hashlib
 import json
 from pathlib import Path
+from pathlib import PurePosixPath
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
+
+from scripts.verify_runtime import verify
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +21,7 @@ REQUIRED_EXPORTS = [
     "mpv_terminate_destroy",
     "mpv_wait_event",
 ]
+API_VERSION = (2 << 16) | 5
 
 
 class VerifyRuntimeTests(unittest.TestCase):
@@ -29,7 +34,11 @@ class VerifyRuntimeTests(unittest.TestCase):
         self.manifest = {
             "schema": 1,
             "target": {"os": "windows", "arch": "x86_64"},
-            "libmpv": {"path": "libmpv-2.dll", "api_major": 2},
+            "libmpv": {
+                "path": "libmpv-2.dll",
+                "api_version": API_VERSION,
+                "api_major": 2,
+            },
             "files": [
                 self.file_record("libmpv-2.dll"),
                 self.file_record("avcodec-62.dll"),
@@ -37,6 +46,7 @@ class VerifyRuntimeTests(unittest.TestCase):
         }
         self.inspection = {
             "schema": 1,
+            "libmpv_api_version": API_VERSION,
             "files": [
                 {
                     "path": "libmpv-2.dll",
@@ -120,6 +130,23 @@ class VerifyRuntimeTests(unittest.TestCase):
 
         self.assert_rejected("libmpv API major must be 2")
 
+    def test_rejects_measured_api_major_other_than_two(self):
+        api_version = (1 << 16) | 99
+        self.manifest["libmpv"]["api_version"] = api_version
+        self.inspection["libmpv_api_version"] = api_version
+
+        self.assert_rejected("measured libmpv API major must be 2")
+
+    def test_rejects_mismatched_api_version_evidence(self):
+        self.inspection["libmpv_api_version"] += 1
+
+        self.assert_rejected("libmpv API version mismatch")
+
+    def test_rejects_missing_api_version_evidence(self):
+        del self.manifest["libmpv"]["api_version"]
+
+        self.assert_rejected("manifest libmpv api_version must be an integer")
+
     def test_rejects_wrong_manifest_schema(self):
         self.manifest["schema"] = 2
 
@@ -146,6 +173,40 @@ class VerifyRuntimeTests(unittest.TestCase):
         self.manifest["files"].append(duplicate)
 
         self.assert_rejected("duplicate path")
+
+    def test_rejects_case_insensitive_duplicate_physical_dlls(self):
+        def physical_path(name, content):
+            path = Mock()
+            path.is_file.return_value = True
+            path.suffix = ".dll"
+            path.relative_to.return_value = PurePosixPath(name)
+            path.read_bytes.return_value = content
+            return path
+
+        directory = Mock()
+        directory.rglob.return_value = [
+            physical_path("libmpv-2.dll", b"libmpv"),
+            physical_path("avcodec-62.dll", b"avcodec"),
+            physical_path("AVCODEC-62.DLL", b"avcodec"),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "duplicate physical DLL path"):
+            verify(self.manifest, self.inspection, directory)
+
+    def test_rejects_non_object_manifest_without_traceback(self):
+        self.manifest = []
+
+        self.assert_rejected("manifest must be an object")
+
+    def test_rejects_non_object_inspection_without_traceback(self):
+        self.inspection = []
+
+        self.assert_rejected("inspection must be an object")
+
+    def test_rejects_non_object_libmpv_without_traceback(self):
+        self.manifest["libmpv"] = []
+
+        self.assert_rejected("manifest libmpv must be an object")
 
     def test_rejects_missing_dll(self):
         (self.directory / "avcodec-62.dll").unlink()

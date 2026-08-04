@@ -17,7 +17,8 @@ sets `-Dlibmpv=true`, and the MinGW script builds in `mingw_build`.
 The workflow must prove that `mingw_build/libmpv-2.dll` exists. It walks the
 DLL's recursive non-system PE imports, copies only that closure, records PE
 machine/import/export inspection, generates a schema-1
-`runtime-manifest.json`, and verifies every declared size and SHA-256. The one
+`runtime-manifest.json`, runs `mpv_client_api_version()` under Wine, and
+verifies the measured API major plus every declared size and SHA-256. The one
 short-lived Actions artifact contains both the candidate directory and a
 source snapshot of the recipe, upstream build tree, Cargo sources, and Ubuntu
 MinGW toolchain sources used by the run.
@@ -33,12 +34,14 @@ read-only repository permissions and no GitHub Release step.
 `runtime-manifest.json` schema 1 declares:
 
 - target `{ "os": "windows", "arch": "x86_64" }`;
-- libmpv path `libmpv-2.dll` and client API major `2`;
+- libmpv path `libmpv-2.dll`, measured client API version, and derived major
+  `2`;
 - the exact flat DLL set, with byte size and SHA-256 for every file.
 
 `pe-inspection.json` schema 1 records each DLL's `pei-x86-64` machine, imports,
-and exports. Verification rejects a wrong target or PE machine, missing core
-libmpv exports, API major other than 2, unsafe or duplicate paths, an incomplete
+and exports, plus the same measured libmpv API version. Verification rejects a
+wrong target or PE machine, missing core libmpv exports, mismatched API evidence,
+measured API major other than 2, unsafe or duplicate paths, an incomplete
 non-system import closure, missing or extra DLLs or PE records, and size/hash
 mismatches.
 
