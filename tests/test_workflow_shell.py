@@ -37,6 +37,42 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertIn("pull_request", triggers)
         self.assertIn("workflow_dispatch", triggers)
 
+    def test_fast_tests_block_long_gate0_build(self):
+        result = subprocess.run(
+            ["yq", "eval", "-o=json", ".jobs", str(WORKFLOW)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        jobs = json.loads(result.stdout)
+
+        self.assertIn("tests", jobs)
+        self.assertEqual(jobs["gate0"].get("needs"), "tests")
+        self.assertEqual(
+            jobs["tests"],
+            {
+                "runs-on": "ubuntu-24.04",
+                "steps": [
+                    {
+                        "name": "Check out runtime recipe",
+                        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+                        "with": {"persist-credentials": False},
+                    },
+                    {
+                        "name": "Run fast repository tests",
+                        "run": "\n".join(
+                            (
+                                "set -euo pipefail",
+                                "python3 -m unittest discover -s tests -p 'test_*.py' -v",
+                                "python3 -m compileall -q scripts tests",
+                            )
+                        )
+                        + "\n",
+                    },
+                ],
+            },
+        )
+
     def test_runtime_probe_pipeline_cannot_mask_wine_failure(self):
         lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
         step = lines.index(STEP)

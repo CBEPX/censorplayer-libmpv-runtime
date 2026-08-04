@@ -8,7 +8,22 @@ permissions:
   contents: read
 
 jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out runtime recipe
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Run fast repository tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -m compileall -q scripts tests
+
   gate0:
+    needs: tests
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
