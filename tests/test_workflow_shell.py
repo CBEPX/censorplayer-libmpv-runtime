@@ -77,9 +77,11 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertEqual(len(run_steps), 1)
         commands = run_steps[0]["run"].splitlines()
         self.assertEqual(commands[0], "set -euo pipefail")
-        self.assertIn(
-            "python3 -m unittest discover -s tests -p 'test_*.py' -v", commands
-        )
+        yq_command = "yq --version"
+        unittest_command = "python3 -m unittest discover -s tests -p 'test_*.py' -v"
+        self.assertIn(yq_command, commands)
+        self.assertIn(unittest_command, commands)
+        self.assertLess(commands.index(yq_command), commands.index(unittest_command))
         self.assertIn("python3 -m compileall -q scripts tests", commands)
 
     def test_runtime_probe_pipeline_cannot_mask_wine_failure(self):
@@ -136,7 +138,10 @@ class WorkflowShellTests(unittest.TestCase):
                   fi
                   shift
                 done
-                test -n "$output"
+                if [[ -z "$output" ]]; then
+                  echo 'fake compiler: missing -o output' >&2
+                  exit 67
+                fi
                 cat >/dev/null
                 api_value=${API_VARIABLE}
                 printf '#!/usr/bin/env bash\\nAPI_MARKERprintf "%%s\\\\n" "%s"\\n' \
@@ -167,6 +172,12 @@ class WorkflowShellTests(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     set -euo pipefail
+                    fail() {
+                      local code=$1
+                      shift
+                      printf 'fake python3: %s\\n' "$*" >&2
+                      exit "$code"
+                    }
                     command=$1
                     shift
                     case "$command" in
@@ -182,7 +193,7 @@ class WorkflowShellTests(unittest.TestCase):
                         search_roots=()
                         while (($#)); do
                           if (($# < 2)); then
-                            exit 65
+                            fail 65 "package_candidate.py: missing value for $1"
                           fi
                           case "$1" in
                             --libmpv)
@@ -202,37 +213,49 @@ class WorkflowShellTests(unittest.TestCase):
                               api_version_count=$((api_version_count + 1))
                               api_version=$2
                               ;;
-                            *) exit 64 ;;
+                            *) fail 64 "package_candidate.py: unknown option $1" ;;
                           esac
                           shift 2
                         done
-                        test "$libmpv_count" -eq 1
-                        test "$libmpv" = upstream/mingw_build/libmpv-2.dll
-                        test "${#search_roots[@]}" -eq 2
-                        test "${search_roots[0]}" = upstream/mingw_prefix/bin
-                        test "${search_roots[1]}" = \
-                          "$RUNNER_TEMP/gate0-runtime-support"
-                        test "$output_count" -eq 1
-                        test "$objdump_count" -eq 1
-                        test "$objdump" = x86_64-w64-mingw32-objdump
-                        test "$api_version_count" -eq 1
+                        [[ "$libmpv_count" -eq 1 ]] || \
+                          fail 67 "package_candidate.py: expected one --libmpv, got $libmpv_count"
+                        [[ "$libmpv" == upstream/mingw_build/libmpv-2.dll ]] || \
+                          fail 67 "package_candidate.py: --libmpv mismatch: got $libmpv"
+                        [[ "${#search_roots[@]}" -eq 2 ]] || \
+                          fail 67 "package_candidate.py: expected two --search-root values, got ${#search_roots[@]}"
+                        [[ "${search_roots[0]}" == upstream/mingw_prefix/bin ]] || \
+                          fail 67 "package_candidate.py: first --search-root mismatch: got ${search_roots[0]}"
+                        [[ "${search_roots[1]}" == \
+                          "$RUNNER_TEMP/gate0-runtime-support" ]] || \
+                          fail 67 "package_candidate.py: second --search-root mismatch: got ${search_roots[1]}"
+                        [[ "$output_count" -eq 1 ]] || \
+                          fail 67 "package_candidate.py: expected one --output, got $output_count"
+                        [[ "$objdump_count" -eq 1 ]] || \
+                          fail 67 "package_candidate.py: expected one --objdump, got $objdump_count"
+                        [[ "$objdump" == x86_64-w64-mingw32-objdump ]] || \
+                          fail 67 "package_candidate.py: --objdump mismatch: got $objdump"
+                        [[ "$api_version_count" -eq 1 ]] || \
+                          fail 67 "package_candidate.py: expected one --api-version, got $api_version_count"
                         case "$output" in
                           "$RUNNER_TEMP/gate0-api-probe")
-                            test "$api_version" = "$FAKE_HEADER_API"
+                            [[ "$api_version" == "$FAKE_HEADER_API" ]] || \
+                              fail 67 "package_candidate.py: probe API mismatch: expected $FAKE_HEADER_API, got $api_version"
                             ;;
                           gate0-candidate)
-                            test "$api_version" = "$FAKE_RUNTIME_API"
+                            [[ "$api_version" == "$FAKE_RUNTIME_API" ]] || \
+                              fail 67 "package_candidate.py: final API mismatch: expected $FAKE_RUNTIME_API, got $api_version"
                             ;;
-                          *) exit 66 ;;
+                          *) fail 66 "package_candidate.py: unknown --output $output" ;;
                         esac
                         mkdir "$output"
                         touch "$output/.packaged-closure"
                         cp upstream/mingw_build/libmpv-2.dll "$output/"
                         ;;
                       scripts/verify_runtime.py)
-                        test -f gate0-candidate/.packaged-closure
+                        [[ -f gate0-candidate/.packaged-closure ]] || \
+                          fail 67 'verify_runtime.py: missing final package marker'
                         ;;
-                      *) exit 64 ;;
+                      *) fail 64 "unexpected command $command" ;;
                     esac
                     """
                 ),
@@ -246,7 +269,11 @@ class WorkflowShellTests(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     set -euo pipefail
-                    test "${WINEDEBUG:-}" = fixme-all
+                    if [[ "${WINEDEBUG:-}" != fixme-all ]]; then
+                      printf 'fake wine: WINEDEBUG mismatch: expected fixme-all, got %s\\n' \
+                        "${WINEDEBUG:-<unset>}" >&2
+                      exit 67
+                    fi
                     if [[ ! -f .packaged-closure ]]; then
                       echo 'Wine ran before package_candidate.py created the probe closure' >&2
                       exit 97
