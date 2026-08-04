@@ -76,6 +76,22 @@ jobs:
           dpkg-query -W 'gcc-mingw-w64*' 'g++-mingw-w64*' 'mingw-w64*' \
             > INSTALLED-PACKAGES.txt
 
+      - name: Stage curated MinGW runtime support
+        run: |
+          set -euo pipefail
+          task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"
+          mkdir -p "$task_runtime_support"
+          # Run 30949090569 proved the recursive closure requires libssp-0.dll.
+          for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll libssp-0.dll; do
+            task_path=$(x86_64-w64-mingw32-gcc-posix -print-file-name="$task_dll")
+            if [[ "$task_path" != /* || ! -f "$task_path" ]]; then
+              printf 'toolchain has no %s (resolved to %s)\n' \
+                "$task_dll" "$task_path" >&2
+              exit 1
+            fi
+            cp "$task_path" "$task_runtime_support/"
+          done
+
       - name: Install upstream Meson wraps
         working-directory: upstream
         run: |
@@ -138,13 +154,7 @@ jobs:
           [[ "$task_expected_api" =~ ^[0-9]+$ ]]
           (( (task_expected_api >> 16) == 2 ))
           task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"
-          mkdir -p "$task_runtime_support"
           task_runtime_roots=(upstream/mingw_prefix/bin "$task_runtime_support")
-          for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
-            task_path=$(x86_64-w64-mingw32-gcc-posix -print-file-name="$task_dll")
-            test -f "$task_path"
-            cp "$task_path" "$task_runtime_support/"
-          done
           task_search_args=()
           for task_root in "${task_runtime_roots[@]}"; do
             task_search_args+=(--search-root "$task_root")

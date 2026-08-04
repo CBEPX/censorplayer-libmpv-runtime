@@ -12,10 +12,11 @@ STEP = "      - name: Package and verify recursive runtime closure"
 ARCHIVE_PREFETCH_STEP = "Prefetch verified upstream archives"
 NV_HEADERS_STEP = "Check out exact nv-codec-headers source"
 PACKAGE_STEP = "Package and verify recursive runtime closure"
+RUNTIME_SUPPORT_STEP = "Stage curated MinGW runtime support"
 
 
 class WorkflowShellTests(unittest.TestCase):
-    def package_script(self):
+    def step_script(self, name):
         result = subprocess.run(
             ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
             check=True,
@@ -23,7 +24,13 @@ class WorkflowShellTests(unittest.TestCase):
             text=True,
         )
         steps = json.loads(result.stdout)
-        return next(step["run"] for step in steps if step.get("name") == PACKAGE_STEP)
+        return next(step["run"] for step in steps if step.get("name") == name)
+
+    def package_script(self):
+        return self.step_script(PACKAGE_STEP)
+
+    def runtime_support_script(self):
+        return self.step_script(RUNTIME_SUPPORT_STEP)
 
     def test_new_repository_pull_request_can_trigger_gate0(self):
         result = subprocess.run(
@@ -102,7 +109,9 @@ class WorkflowShellTests(unittest.TestCase):
             "the packaging step can mask a failed command at the start of a pipeline",
         )
 
-    def run_package_script(self, header_api="131077", runtime_api="131077"):
+    def run_package_script(
+        self, header_api="131077", runtime_api="131077", missing_runtime=None
+    ):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tools = root / "tools"
@@ -115,8 +124,16 @@ class WorkflowShellTests(unittest.TestCase):
             runtime.mkdir()
             runner_temp = root / "runner-temp"
             runner_temp.mkdir()
-            for name in ("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll"):
-                (runtime / name).write_bytes(name.encode())
+            for name in (
+                "libgcc_s_seh-1.dll",
+                "libstdc++-6.dll",
+                "libwinpthread-1.dll",
+                "libssp-0.dll",
+            ):
+                if name != missing_runtime:
+                    (runtime / name).write_bytes(name.encode())
+            if missing_runtime:
+                (root / missing_runtime).write_bytes(b"workspace collision")
 
             compiler = textwrap.dedent(
                 """\
@@ -126,7 +143,12 @@ class WorkflowShellTests(unittest.TestCase):
                 for argument in "$@"; do
                   case "$argument" in
                     -print-file-name=*)
-                      printf '%s/%s\\n' "$FAKE_RUNTIME" "${argument#*=}"
+                      task_name=${argument#*=}
+                      if [[ -f "$FAKE_RUNTIME/$task_name" ]]; then
+                        printf '%s/%s\\n' "$FAKE_RUNTIME" "$task_name"
+                      else
+                        printf '%s\\n' "$task_name"
+                      fi
                       exit
                       ;;
                   esac
@@ -228,6 +250,19 @@ class WorkflowShellTests(unittest.TestCase):
                         [[ "${search_roots[1]}" == \
                           "$RUNNER_TEMP/gate0-runtime-support" ]] || \
                           fail 67 "package_candidate.py: second --search-root mismatch: got ${search_roots[1]}"
+                        expected_support=(
+                          libgcc_s_seh-1.dll
+                          libstdc++-6.dll
+                          libwinpthread-1.dll
+                          libssp-0.dll
+                        )
+                        actual_support=("$RUNNER_TEMP/gate0-runtime-support"/*.dll)
+                        [[ "${#actual_support[@]}" -eq "${#expected_support[@]}" ]] || \
+                          fail 67 "package_candidate.py: expected ${#expected_support[@]} curated runtime DLLs, got ${#actual_support[@]}"
+                        for task_expected in "${expected_support[@]}"; do
+                          [[ -f "$RUNNER_TEMP/gate0-runtime-support/$task_expected" ]] || \
+                            fail 67 "package_candidate.py: missing curated $task_expected"
+                        done
                         [[ "$output_count" -eq 1 ]] || \
                           fail 67 "package_candidate.py: expected one --output, got $output_count"
                         [[ "$objdump_count" -eq 1 ]] || \
@@ -296,6 +331,16 @@ class WorkflowShellTests(unittest.TestCase):
                     "FAKE_RUNTIME_API": runtime_api,
                 }
             )
+            staging_result = subprocess.run(
+                ["bash", "-c", self.runtime_support_script()],
+                cwd=root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+            if staging_result.returncode != 0:
+                return staging_result, False, False
             step = root / "step.sh"
             step.write_text(self.package_script(), encoding="utf-8")
             result = subprocess.run(
@@ -333,6 +378,14 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertTrue(header_api_ran, "the header API helper did not run")
         self.assertFalse(wine_ran, "the invalid header API reached Wine")
 
+    def test_runtime_support_fails_early_with_named_missing_dll(self):
+        result, _, _ = self.run_package_script(
+            missing_runtime="libssp-0.dll"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("toolchain has no libssp-0.dll", result.stderr)
+
     def test_package_uses_curated_runtime_support_root(self):
         result = subprocess.run(
             ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
@@ -346,17 +399,31 @@ class WorkflowShellTests(unittest.TestCase):
         script = matching_steps[0]["run"]
         contracts = (
             'task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"',
-            'mkdir -p "$task_runtime_support"',
             'task_runtime_roots=(upstream/mingw_prefix/bin "$task_runtime_support")',
-            "for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do",
-            'test -f "$task_path"',
-            'cp "$task_path" "$task_runtime_support/"',
         )
         for contract in contracts:
             with self.subTest(contract=contract):
                 self.assertIn(contract, script)
+        runtime_steps = [
+            step for step in steps if step.get("name") == RUNTIME_SUPPORT_STEP
+        ]
+        self.assertEqual(len(runtime_steps), 1)
+        names = [step.get("name") for step in steps]
+        self.assertLess(
+            names.index("Install upstream MinGW build dependencies"),
+            names.index(RUNTIME_SUPPORT_STEP),
+        )
+        self.assertLess(
+            names.index(RUNTIME_SUPPORT_STEP),
+            names.index("Build upstream dependency set"),
+        )
+        runtime_script = runtime_steps[0]["run"]
+        self.assertEqual(runtime_script.splitlines()[0], "set -euo pipefail")
+        self.assertIn('mkdir -p "$task_runtime_support"', runtime_script)
+        self.assertIn('cp "$task_path" "$task_runtime_support/"', runtime_script)
         self.assertNotIn('dirname "$task_path"', script)
         self.assertNotIn("task_runtime_roots+=(", script)
+        self.assertNotIn("for task_dll in", script)
 
     def test_archive_prefetch_populates_upstream_wget_cache(self):
         result = subprocess.run(

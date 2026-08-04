@@ -123,6 +123,14 @@ else:
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertIn("duplicate available DLL name", result.stderr)
 
+    def test_rejects_missing_search_root(self):
+        missing = self.root / "missing"
+
+        result = self.run_packager([missing])
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"search root is not a directory: {missing}", result.stderr)
+
     def test_rejects_invalid_measured_api_version(self):
         result = self.run_packager(api_version="not-a-version")
 

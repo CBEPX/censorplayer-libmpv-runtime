@@ -55,6 +55,8 @@ def package(libmpv, search_roots, output, objdump, api_version):
     available = {}
     add_available(libmpv)
     for root in search_roots:
+        if not root.is_dir():
+            raise ValueError(f"search root is not a directory: {root}")
         for path in root.rglob("*"):
             if path.is_file() and path.suffix.casefold() == ".dll":
                 add_available(path)
