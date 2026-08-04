@@ -8,6 +8,7 @@ WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/gate0.yml"
 STEP = "      - name: Package and verify recursive runtime closure"
 ARCHIVE_PREFETCH_STEP = "Prefetch verified upstream archives"
 NV_HEADERS_STEP = "Check out exact nv-codec-headers source"
+PACKAGE_STEP = "Package and verify recursive runtime closure"
 
 
 class WorkflowShellTests(unittest.TestCase):
@@ -40,6 +41,31 @@ class WorkflowShellTests(unittest.TestCase):
             0,
             "the packaging step can mask a failed command at the start of a pipeline",
         )
+
+    def test_package_uses_curated_runtime_support_root(self):
+        result = subprocess.run(
+            ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        steps = json.loads(result.stdout)
+        matching_steps = [step for step in steps if step.get("name") == PACKAGE_STEP]
+        self.assertEqual(len(matching_steps), 1)
+        script = matching_steps[0]["run"]
+        contracts = (
+            'task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"',
+            'mkdir -p "$task_runtime_support"',
+            'task_runtime_roots=(upstream/mingw_prefix/bin "$task_runtime_support")',
+            "for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do",
+            'test -f "$task_path"',
+            'cp "$task_path" "$task_runtime_support/"',
+        )
+        for contract in contracts:
+            with self.subTest(contract=contract):
+                self.assertIn(contract, script)
+        self.assertNotIn('dirname "$task_path"', script)
+        self.assertNotIn("task_runtime_roots+=(", script)
 
     def test_archive_prefetch_populates_upstream_wget_cache(self):
         result = subprocess.run(

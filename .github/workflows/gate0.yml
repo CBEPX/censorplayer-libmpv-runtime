@@ -107,11 +107,13 @@ jobs:
       - name: Package and verify recursive runtime closure
         run: |
           set -euo pipefail
-          task_runtime_roots=(upstream/mingw_prefix/bin)
+          task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"
+          mkdir -p "$task_runtime_support"
+          task_runtime_roots=(upstream/mingw_prefix/bin "$task_runtime_support")
           for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
             task_path=$(x86_64-w64-mingw32-gcc-posix -print-file-name="$task_dll")
             test -f "$task_path"
-            task_runtime_roots+=("$(dirname "$task_path")")
+            cp "$task_path" "$task_runtime_support/"
           done
           task_probe_dir="$RUNNER_TEMP/gate0-api-probe"
           mkdir -p "$task_probe_dir"
