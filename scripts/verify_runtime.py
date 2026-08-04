@@ -61,6 +61,7 @@ SYSTEM_DLLS = {
     "userenv.dll",
     "usp10.dll",
     "uuid.dll",
+    "uxtheme.dll",
     "version.dll",
     "winhttp.dll",
     "wininet.dll",
