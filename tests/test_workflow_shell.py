@@ -7,6 +7,7 @@ import unittest
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/gate0.yml"
 STEP = "      - name: Package and verify recursive runtime closure"
 PREFETCH_STEP = "Prefetch verified libiconv source"
+NV_HEADERS_STEP = "Check out exact nv-codec-headers source"
 
 
 class WorkflowShellTests(unittest.TestCase):
@@ -69,6 +70,35 @@ class WorkflowShellTests(unittest.TestCase):
         for contract in contracts:
             with self.subTest(contract=contract):
                 self.assertIn(contract, script)
+
+    def test_nv_codec_headers_checkout_is_pinned_before_upstream_build(self):
+        result = subprocess.run(
+            ["yq", "eval", "-o=json", ".jobs.gate0.steps", str(WORKFLOW)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        steps = json.loads(result.stdout)
+        matching_steps = [step for step in steps if step.get("name") == NV_HEADERS_STEP]
+        self.assertEqual(len(matching_steps), 1, "missing pinned nv-codec-headers checkout")
+        step = matching_steps[0]
+        self.assertEqual(
+            step,
+            {
+                "name": NV_HEADERS_STEP,
+                "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5",
+                "with": {
+                    "repository": "FFmpeg/nv-codec-headers",
+                    "ref": "876af32a202d0de83bd1d36fe74ee0f7fcf86b0d",
+                    "path": "upstream/nv-codec-headers",
+                    "persist-credentials": False,
+                },
+            },
+        )
+        names = [step.get("name") for step in steps]
+        self.assertLess(
+            names.index(NV_HEADERS_STEP), names.index("Build upstream dependency set")
+        )
 
 
 if __name__ == "__main__":

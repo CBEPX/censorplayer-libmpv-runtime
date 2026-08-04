@@ -36,6 +36,14 @@ jobs:
           path: upstream/ffmpeg
           persist-credentials: false
 
+      - name: Check out exact nv-codec-headers source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: FFmpeg/nv-codec-headers
+          ref: 876af32a202d0de83bd1d36fe74ee0f7fcf86b0d
+          path: upstream/nv-codec-headers
+          persist-credentials: false
+
       - name: Install upstream MinGW build dependencies
         run: |
           rustup target add "$RUST_TARGET"
