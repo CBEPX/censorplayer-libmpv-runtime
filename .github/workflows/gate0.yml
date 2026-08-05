@@ -1,0 +1,467 @@
+name: Gate 0 candidate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out runtime recipe
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Run fast repository tests
+        run: |
+          set -euo pipefail
+          yq --version
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 -m compileall -q scripts tests
+
+  gate0:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-w64-mingw32
+      RUST_TARGET: x86_64-pc-windows-gnu
+    steps:
+      - name: Check out runtime recipe
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Check out exact mpv source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: mpv-player/mpv
+          ref: 85bf9f4ff46cd45686cfe2fd22f49828877db5cb
+          path: upstream
+          persist-credentials: false
+
+      - name: Replace only FFmpeg checkout with exact source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: FFmpeg/FFmpeg
+          ref: 272c273d30f737632e6630458ed36a0bdbfbc3fc
+          path: upstream/ffmpeg
+          persist-credentials: false
+
+      - name: Check out exact nv-codec-headers source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: FFmpeg/nv-codec-headers
+          ref: 876af32a202d0de83bd1d36fe74ee0f7fcf86b0d
+          path: upstream/nv-codec-headers
+          persist-credentials: false
+
+      - name: Install upstream MinGW build dependencies
+        run: |
+          rustup target add "$RUST_TARGET"
+          sudo dpkg --add-architecture i386
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            ccache g++-mingw-w64 gcc-multilib nasm ninja-build pkgconf wine64 wine
+          python3 -m pip install meson
+          mkdir -p "$RUNNER_TEMP/gate0-toolchain-source"
+          cd "$RUNNER_TEMP/gate0-toolchain-source" || exit 1
+          apt-get source gcc-mingw-w64-x86-64 mingw-w64
+          dpkg-query -W 'gcc-mingw-w64*' 'g++-mingw-w64*' 'mingw-w64*' \
+            > INSTALLED-PACKAGES.txt
+
+      - name: Stage curated MinGW runtime support
+        run: |
+          set -euo pipefail
+          task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"
+          mkdir -p "$task_runtime_support"
+          # Run 30949090569 proved the recursive closure requires libssp-0.dll.
+          for task_dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll libssp-0.dll; do
+            task_path=$(x86_64-w64-mingw32-gcc-posix -print-file-name="$task_dll")
+            if [[ "$task_path" != /* || ! -f "$task_path" ]]; then
+              printf 'toolchain has no %s (resolved to %s)\n' \
+                "$task_dll" "$task_path" >&2
+              exit 1
+            fi
+            cp "$task_path" "$task_runtime_support/"
+          done
+
+      - name: Install upstream Meson wraps
+        working-directory: upstream
+        run: |
+          mkdir -p subprojects
+          meson wrap install mujs
+          meson subprojects download
+
+      - name: Prefetch verified upstream archives
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          prefetch_archive() {
+            local task_archive=$1
+            local task_size=$2
+            local task_sha256=$3
+            local task_url=$4
+            curl --fail --show-error --silent --location \
+              --retry 5 --retry-all-errors --connect-timeout 20 \
+              --output "$task_archive" "$task_url"
+            test "$(wc -c < "$task_archive")" -eq "$task_size"
+            printf '%s  %s\n' "$task_sha256" "$task_archive" \
+              | sha256sum --check --strict
+          }
+          while read -r task_archive task_size task_sha256 task_url; do
+            prefetch_archive "$task_archive" "$task_size" "$task_sha256" "$task_url"
+          done <<'EOF'
+          libiconv-1.18.tar.gz 5822590 3b08f5f4f9b4eb82f151a7040bfd6fe6c6fb922efe4b1659c66ea933276965e8 https://ftp.gnu.org/gnu/libiconv/libiconv-1.18.tar.gz
+          zlib-1.3.1.tar.gz 1512791 9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23 https://zlib.net/fossils/zlib-1.3.1.tar.gz
+          AMF-headers-v1.5.0.tar.gz 82755 d569647fa26f289affe81a206259fa92f819d06db1e80cc334559953e82a3f01 https://github.com/GPUOpen-LibrariesAndSDKs/AMF/releases/download/v1.5.0/AMF-headers-v1.5.0.tar.gz
+          freetype-2.14.1.tar.xz 2664948 32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc https://download-mirror.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.xz
+          fribidi-1.0.16.tar.xz 1098260 1b1cde5b235d40479e91be2f0e88a309e3214c8ab470ec8a2744d82a5a9ea05c https://github.com/fribidi/fribidi/releases/download/v1.0.16/fribidi-1.0.16.tar.xz
+          harfbuzz-12.2.0.tar.xz 18221900 ecb603aa426a8b24665718667bda64a84c1504db7454ee4cadbd362eea64e545 https://github.com/harfbuzz/harfbuzz/releases/download/12.2.0/harfbuzz-12.2.0.tar.xz
+          EOF
+
+      - name: Build upstream dependency set
+        working-directory: upstream
+        run: ./ci/build-mingw64.sh
+
+      - name: Build upstream mpv and package its dependencies
+        working-directory: upstream
+        run: ./ci/build-mingw64.sh meson pack
+
+      - name: Prove libmpv output exists
+        run: test -f upstream/mingw_build/libmpv-2.dll
+
+      - name: Package and verify recursive runtime closure
+        run: |
+          set -euo pipefail
+          task_header_probe="$RUNNER_TEMP/libmpv-header-api-version"
+          cc -Iupstream/include -o "$task_header_probe" -x c - <<'EOF'
+          #include <stdio.h>
+          #include <mpv/client.h>
+
+          int main(void) {
+              printf("%lu\n", (unsigned long) MPV_CLIENT_API_VERSION);
+              return 0;
+          }
+          EOF
+          task_expected_api=$("$task_header_probe")
+          [[ "$task_expected_api" =~ ^[0-9]+$ ]]
+          (( (task_expected_api >> 16) == 2 ))
+          task_runtime_support="$RUNNER_TEMP/gate0-runtime-support"
+          task_runtime_roots=(upstream/mingw_prefix/bin "$task_runtime_support")
+          task_search_args=()
+          for task_root in "${task_runtime_roots[@]}"; do
+            task_search_args+=(--search-root "$task_root")
+          done
+          task_probe_dir="$RUNNER_TEMP/gate0-api-probe"
+          python3 scripts/package_candidate.py \
+            --libmpv upstream/mingw_build/libmpv-2.dll \
+            "${task_search_args[@]}" \
+            --output "$task_probe_dir" \
+            --objdump x86_64-w64-mingw32-objdump \
+            --api-version "$task_expected_api"
+          x86_64-w64-mingw32-gcc-posix \
+            -Iupstream/include \
+            -Lupstream/mingw_build \
+            -o "$task_probe_dir/libmpv-api-version.exe" \
+            -x c - -lmpv <<'EOF'
+          #include <stdio.h>
+          #include <mpv/client.h>
+
+          int main(void) {
+              printf("%lu\n", mpv_client_api_version());
+              return 0;
+          }
+          EOF
+          task_api_version=$(
+            cd "$task_probe_dir" || exit 1
+            WINEDEBUG=fixme-all wine ./libmpv-api-version.exe | tr -d '\r'
+          )
+          [[ "$task_api_version" =~ ^[0-9]+$ ]]
+          (( (task_api_version >> 16) == 2 ))
+          (( task_api_version == task_expected_api ))
+          python3 scripts/package_candidate.py \
+            --libmpv upstream/mingw_build/libmpv-2.dll \
+            "${task_search_args[@]}" \
+            --output gate0-candidate \
+            --objdump x86_64-w64-mingw32-objdump \
+            --api-version "$task_api_version"
+          python3 scripts/verify_runtime.py \
+            --manifest gate0-candidate/runtime-manifest.json \
+            --inspection gate0-candidate/pe-inspection.json \
+            --directory gate0-candidate
+
+      - name: Snapshot all corresponding source
+        run: |
+          set -euo pipefail
+          task_snapshot="$RUNNER_TEMP/gate0-source-snapshot"
+          mkdir -p "$task_snapshot/recipe" "$task_snapshot/upstream" \
+            "$task_snapshot/toolchain-source" "$task_snapshot/cargo"
+          git -c core.autocrlf=false -c core.eol=lf archive HEAD \
+            | tar -xf - -C "$task_snapshot/recipe"
+          tar -C upstream \
+            --exclude=mingw_build \
+            --exclude=mingw_prefix \
+            --exclude=artifact \
+            --exclude='*/builddir' \
+            -cf - . | tar -xf - -C "$task_snapshot/upstream"
+          cp -a "$RUNNER_TEMP/gate0-toolchain-source/." \
+            "$task_snapshot/toolchain-source/"
+          task_cargo_root="${CARGO_HOME:-/home/runner/.cargo}"
+          task_cargo_sources=0
+          if [[ -d "$task_cargo_root/registry/src" ]]; then
+            cp -a "$task_cargo_root/registry/src" "$task_snapshot/cargo/registry-src"
+            task_cargo_sources=$((task_cargo_sources + 1))
+          fi
+          if [[ -d "$task_cargo_root/git/checkouts" ]]; then
+            cp -a "$task_cargo_root/git/checkouts" "$task_snapshot/cargo/git-checkouts"
+            task_cargo_sources=$((task_cargo_sources + 1))
+          fi
+          if ((task_cargo_sources == 0)); then
+            printf 'no Cargo source directories found under %s\n' "$task_cargo_root" >&2
+            exit 1
+          fi
+          bash scripts/verify_source_snapshot.sh "$task_snapshot"
+          tar -czf gate0-source-snapshot.tar.gz -C "$task_snapshot" .
+          test -s gate0-source-snapshot.tar.gz
+
+      - name: Upload candidate with source snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gate0-windows-x64-${{ github.sha }}
+          path: |
+            gate0-candidate
+            gate0-source-snapshot.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  qualify-consumer:
+    needs: gate0
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Check out runtime recipe
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Download exact Gate 0 candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # Keep candidate and source snapshot bound in one downloaded artifact.
+          name: gate0-windows-x64-${{ github.sha }}
+          path: gate0-artifact
+
+      - name: Verify bundled recipe snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_source=gate0-artifact/gate0-source-snapshot.tar.gz
+          test -s "$task_source"
+          task_check=source-snapshot-check
+          mkdir -p "$task_check/actual" "$task_check/expected"
+          tar -tzf "$task_source" > "$task_check/entries.txt"
+          for task_directory in upstream toolchain-source cargo; do
+            grep -Eq "^\./${task_directory}/.+" "$task_check/entries.txt"
+          done
+          # Extract only the recipe: upstream source trees can contain names
+          # that are legal on Linux but cannot be materialized on Windows.
+          tar -xzf "$task_source" -C "$task_check/actual" ./recipe
+          git -c core.autocrlf=false -c core.eol=lf archive HEAD \
+            | tar -xf - -C "$task_check/expected"
+          diff -qr "$task_check/expected" "$task_check/actual/recipe"
+
+      - name: Check out exact CensorPlayer consumer
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: CBEPX/mpvnet-censor-extension
+          ref: 6d2586d32d9aa733f5e9c51fdfee28abe54bc1e4
+          path: consumer
+          persist-credentials: false
+
+      - name: Set up pinned .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+          cache: true
+          cache-dependency-path: consumer/**/packages.lock.json
+
+      - name: Restore pinned mpv.net reference
+        working-directory: consumer
+        shell: bash
+        run: bash scripts/restore-mpvnet.sh
+
+      - name: Build and test exact CensorPlayer consumer
+        working-directory: consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet restore CensorPlayer.sln --locked-mode
+          dotnet build CensorPlayer.sln --configuration Release --no-restore
+          dotnet test CensorPlayer.sln --configuration Release --no-build --no-restore
+
+      - name: Stage stock portable CensorPlayer
+        working-directory: consumer
+        shell: pwsh
+        run: |
+          $ConsumerCommit = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $ConsumerCommit -notmatch '^[0-9a-f]{40}$') {
+              throw "Could not resolve the checked-out CensorPlayer commit."
+          }
+          ./scripts/package-windows.ps1 `
+            -Commit $ConsumerCommit `
+            -RunId $env:GITHUB_RUN_ID `
+            -SkipInstaller
+
+      - name: Verify and overlay candidate runtime
+        shell: pwsh
+        run: |
+          $Candidate = "gate0-artifact/gate0-candidate"
+          $Stage = @(Get-ChildItem "consumer/artifacts/windows/stage" -Directory)
+          if ($Stage.Count -ne 1) {
+              throw "Expected one staged portable directory, got $($Stage.Count)."
+          }
+          python scripts/overlay_runtime.py `
+            --manifest "$Candidate/runtime-manifest.json" `
+            --inspection "$Candidate/pe-inspection.json" `
+            --candidate "$Candidate" `
+            --target "$($Stage[0].FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "Candidate overlay failed." }
+          $MpvNet = @(Get-ChildItem $Stage[0].FullName -Filter "mpvnet.com" -File)
+          if ($MpvNet.Count -ne 1) {
+              throw "Expected one staged mpvnet.com, got $($MpvNet.Count)."
+          }
+          "QUALIFIED_MPVNET=$($MpvNet[0].FullName)" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify loaded libmpv identity
+        shell: pwsh
+        run: |
+          $Manifest = Get-Content `
+            "gate0-artifact/gate0-candidate/runtime-manifest.json" `
+            -Raw | ConvertFrom-Json
+          $Libmpv = @(
+              $Manifest.files | Where-Object { $_.path -ieq $Manifest.libmpv.path }
+          )
+          if ($Libmpv.Count -ne 1) {
+              throw "Candidate manifest has no unique libmpv file record."
+          }
+          $PlayerDirectory = Split-Path -Parent "$env:QUALIFIED_MPVNET"
+          $PlayerPath = [IO.Path]::GetFullPath((Join-Path $PlayerDirectory "mpvnet.exe"))
+          if (-not (Test-Path $PlayerPath -PathType Leaf)) {
+              throw "Staged mpvnet.exe is missing."
+          }
+          $ExpectedPath = [IO.Path]::GetFullPath((Join-Path `
+            $PlayerDirectory $Manifest.libmpv.path))
+          $ExpectedHash = $Libmpv[0].sha256
+          $StdOut = Join-Path $env:RUNNER_TEMP "libmpv-identity.stdout.log"
+          $StdErr = Join-Path $env:RUNNER_TEMP "libmpv-identity.stderr.log"
+          $Process = $null
+          try {
+              # mpvnet.com is a relay; inspect the GUI process that loads libmpv.
+              $Process = Start-Process "$PlayerPath" `
+                -ArgumentList @(
+                    "--no-config",
+                    "--load-scripts=no",
+                    "--process-instance=multi",
+                    "--idle=yes",
+                    "--input-terminal=no",
+                    "--vo=null",
+                    "--ao=null"
+                ) `
+                -RedirectStandardOutput $StdOut `
+                -RedirectStandardError $StdErr `
+                -PassThru
+              $Deadline = [DateTime]::UtcNow.AddSeconds(60)
+              $Loaded = @()
+              do {
+                  if ($Process.HasExited) {
+                      throw "Staged mpv.net exited before loading libmpv."
+                  }
+                  try {
+                      $Process.Refresh()
+                      $Loaded = @(
+                          $Process.Modules |
+                            Where-Object { $_.ModuleName -ieq $Manifest.libmpv.path }
+                      )
+                  }
+                  catch {
+                      # A live process can briefly reject module enumeration at startup.
+                      $Loaded = @()
+                  }
+                  if ($Loaded.Count -eq 1) { break }
+                  Start-Sleep -Milliseconds 200
+              } while ([DateTime]::UtcNow -lt $Deadline)
+              if ($Loaded.Count -ne 1) {
+                  throw "Staged mpv.net did not load exactly one libmpv module."
+              }
+              $ActualPath = [IO.Path]::GetFullPath($Loaded[0].FileName)
+              if (-not $ActualPath.Equals(
+                  $ExpectedPath,
+                  [StringComparison]::OrdinalIgnoreCase)) {
+                  throw "Staged mpv.net loaded libmpv from $ActualPath instead of $ExpectedPath."
+              }
+              $ActualHash = (Get-FileHash $ActualPath -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($ActualHash -ne $ExpectedHash) {
+                  throw "Loaded libmpv SHA-256 does not match the candidate manifest."
+              }
+              Write-Host "Loaded candidate libmpv identity: $ActualHash"
+          }
+          catch {
+              $Failure = $_.Exception.Message
+              if ($null -ne $Process -and -not $Process.HasExited) {
+                  Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+                  $Process.WaitForExit()
+              }
+              $Output = (Get-Content $StdOut, $StdErr -Raw -ErrorAction SilentlyContinue) -join "`n"
+              throw "$Failure`n$Output"
+          }
+          finally {
+              if ($null -ne $Process -and -not $Process.HasExited) {
+                  Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+                  $Process.WaitForExit()
+              }
+          }
+
+      - name: Verify staged extension loader contract
+        working-directory: consumer
+        shell: pwsh
+        run: |
+          $Extension = @(
+              Get-ChildItem `
+                "artifacts/windows/stage/*/portable_config/extensions/CensorExtension/CensorExtension.dll" `
+                -File
+          )
+          if ($Extension.Count -ne 1) {
+              throw "Expected one staged CensorExtension.dll, got $($Extension.Count)."
+          }
+          dotnet run `
+            --project tests/Censor.LoaderSmoke/Censor.LoaderSmoke.csproj `
+            --configuration Release `
+            --no-build `
+            --no-restore `
+            -- `
+            "$($Extension[0].FullName)"
+
+      - name: Verify CensorPlayer audio filters
+        shell: pwsh
+        run: >-
+          ./consumer/scripts/smoke-audio-filters.ps1
+          -MpvNetPath "$env:QUALIFIED_MPVNET"
+
+      - name: Verify CensorPlayer runtime behavior
+        shell: pwsh
+        run: >-
+          ./consumer/scripts/smoke-extension-runtime.ps1
+          -MpvNetPath "$env:QUALIFIED_MPVNET"
+          -VerifyAudioWatchdog
