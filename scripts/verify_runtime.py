@@ -15,6 +15,7 @@ REQUIRED_EXPORTS = {
     "mpv_terminate_destroy",
     "mpv_wait_event",
 }
+LIBMPV_NAME = "libmpv-2.dll"
 # Only Windows-provided DLLs belong here; never add toolchain or third-party runtimes.
 SYSTEM_DLLS = {
     "advapi32.dll",
@@ -127,7 +128,7 @@ def verify(manifest, inspection, directory):
     libmpv = manifest.get("libmpv")
     if not isinstance(libmpv, dict):
         raise ValueError("manifest libmpv must be an object")
-    if libmpv.get("path") != "libmpv-2.dll":
+    if libmpv.get("path") != LIBMPV_NAME:
         raise ValueError("libmpv path must be libmpv-2.dll")
     api_version = libmpv.get("api_version")
     if (
@@ -146,6 +147,8 @@ def verify(manifest, inspection, directory):
 
     files = indexed_records(manifest.get("files"), "manifest")
     inspected = indexed_records(inspection.get("files"), "inspection")
+    if LIBMPV_NAME not in files:
+        raise ValueError("manifest is missing libmpv-2.dll")
     actual = {}
     for path in directory.rglob("*"):
         if not path.is_file() or path.suffix.casefold() != ".dll":
@@ -188,7 +191,7 @@ def verify(manifest, inspection, directory):
             raise ValueError(f"{path}: invalid exports")
         if not isinstance(imports, list) or not all(isinstance(x, str) for x in imports):
             raise ValueError(f"{path}: invalid imports")
-        if key == "libmpv-2.dll":
+        if key == LIBMPV_NAME:
             missing_exports = REQUIRED_EXPORTS - set(exports)
             if missing_exports:
                 raise ValueError(
@@ -198,7 +201,7 @@ def verify(manifest, inspection, directory):
             if imported.casefold() not in files and not is_system_dll(imported):
                 raise ValueError(f"undeclared non-system import: {imported}")
 
-    return len(files)
+    return actual
 
 
 def main():
@@ -211,11 +214,11 @@ def main():
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
         inspection = json.loads(args.inspection.read_text(encoding="utf-8"))
-        count = verify(manifest, inspection, args.directory)
+        files = verify(manifest, inspection, args.directory)
     except (OSError, TypeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    print(f"verified {count} DLLs")
+    print(f"verified {len(files)} DLLs")
     return 0
 
 

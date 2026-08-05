@@ -125,6 +125,21 @@ class VerifyRuntimeTests(unittest.TestCase):
 
         self.assert_rejected("libmpv-2.dll: missing exports: mpv_initialize")
 
+    def test_rejects_manifest_without_libmpv_file(self):
+        (self.directory / "libmpv-2.dll").unlink()
+        self.manifest["files"] = [
+            record
+            for record in self.manifest["files"]
+            if record["path"] != "libmpv-2.dll"
+        ]
+        self.inspection["files"] = [
+            record
+            for record in self.inspection["files"]
+            if record["path"] != "libmpv-2.dll"
+        ]
+
+        self.assert_rejected("manifest is missing libmpv-2.dll")
+
     def test_rejects_api_major_other_than_two(self):
         self.manifest["libmpv"]["api_major"] = 1
 
